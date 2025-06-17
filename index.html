@@ -45,14 +45,31 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
+<script src="https://unpkg.com/signalhub@5.0.1/signalhub.js"></script>    const CHUNK_SIZE = 64 * 1024;
+    
+<!-- Add this inside your <body> just above </body> -->
+<div id="logBox" style="white-space: pre-wrap; background:#111; color:#0f0; padding:10px; font-family:monospace; margin-top:20px; border-radius:10px; max-height:200px; overflow:auto;"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
 <script src="https://unpkg.com/signalhub@5.0.1/signalhub.js"></script>
 <script>
-const hub = signalhub('p2p-file-share-hub', ['https://signalhub-jccqtwhdwc.now.sh']);
-let peerId = null, deviceName = null, connections = {}, sharedFiles = {};
-const receivedChunks = {};
+const logBox = document.getElementById('logBox');
+function logToBox(msg, type = 'log') {
+  const div = document.createElement('div');
+  div.style.color = type === 'error' ? 'red' : '#0f0';
+  div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logBox.appendChild(div);
+  logBox.scrollTop = logBox.scrollHeight;
+}
+const oldLog = console.log, oldErr = console.error;
+console.log = (...args) => { oldLog(...args); logToBox(args.join(' ')); };
+console.error = (...args) => { oldErr(...args); logToBox(args.join(' '), 'error'); };
+
+// existing code below
+const hub = signalhub('p2p-file-share-hub', [ 'https://signalhub-jccqtwhdwc.now.sh' ]);
+let peerId = null, deviceName = null, connections = {}, sharedFiles = {}, receivedChunks = {};
 
 function generatePeerId() { return Math.floor(1000 + Math.random() * 9000).toString(); }
-
 function getDevice() {
   const ua = navigator.userAgent.toLowerCase();
   if (ua.includes('vivo')) return 'Vivo';
@@ -61,7 +78,6 @@ function getDevice() {
   if (ua.includes('samsung')) return 'Samsung';
   return 'Android';
 }
-
 function createDeviceLogo(name) {
   const logo = document.createElement('div');
   logo.textContent = name.charAt(0).toUpperCase();
@@ -75,17 +91,14 @@ function createDeviceLogo(name) {
   logo.style.alignItems = 'center';
   return logo;
 }
-
 function uiFunctions() {
   document.getElementById('MySenderID').textContent = peerId;
   document.getElementById('MyDeviceName').textContent = deviceName;
   document.getElementById('MyDeviceLogo').appendChild(createDeviceLogo(deviceName));
 }
-
 function android13loader(show = true) {
   document.querySelector('.loaderOverlay').style.display = show ? 'flex' : 'none';
 }
-
 function android13popup(message) {
   const popup = document.createElement('div');
   popup.textContent = message;
@@ -99,27 +112,28 @@ function android13popup(message) {
   document.body.appendChild(popup);
   setTimeout(() => popup.remove(), 3000);
 }
-
 function createPeerConnection() {
   hub.subscribe('connect').on('data', (data) => {
     if (data.to === peerId && !connections[data.from]) {
+      logToBox(`Incoming connection from: ${data.from}`);
       const incoming = new SimplePeer({ initiator: false, trickle: false });
       incoming.on('signal', signal => hub.broadcast('signal', { to: data.from, from: peerId, signal }));
       incoming.on('data', receiveFiles);
+      incoming.on('error', err => console.error("Incoming peer error", err));
       connections[data.from] = incoming;
       incoming.signal(data.signal);
     }
   });
-
   hub.subscribe('signal').on('data', (data) => {
     if (data.to === peerId && connections[data.from]) {
+      logToBox(`Received signal from: ${data.from}`);
       connections[data.from].signal(data.signal);
     }
   });
 }
-
 function sendFiles() {
   const files = document.getElementById('fileInput').files;
+  if (!files.length) return logToBox("No file selected.", "error");
   for (let file of files) {
     const CHUNK_SIZE = 64 * 1024;
     const reader = new FileReader();
@@ -138,28 +152,26 @@ function sendFiles() {
         connections[id].send(JSON.stringify({ type: 'meta', metadata }));
       }
       android13loader(true);
+      logToBox(`Sending "${file.name}" in ${totalChunks} chunks...`);
       for (let i = 0; i < totalChunks; i++) {
         const chunk = uint8Array.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
         for (let id in connections) {
-          connections[id].send(JSON.stringify({
-            type: 'chunk',
-            name: file.name,
-            index: i,
-            chunk: Array.from(chunk)
-          }));
+          connections[id].send(JSON.stringify({ type: 'chunk', name: file.name, index: i, chunk: Array.from(chunk) }));
         }
       }
       android13loader(false);
+      logToBox(`File "${file.name}" sent!`);
     };
+    reader.onerror = e => console.error("File read error", e);
     reader.readAsArrayBuffer(file);
   }
 }
-
 function receiveFiles(data) {
   try {
     const parsed = JSON.parse(data);
     if (parsed.type === 'meta') {
       receivedChunks[parsed.metadata.name] = { metadata: parsed.metadata, chunks: [], count: 0 };
+      logToBox(`Receiving file: ${parsed.metadata.name}`);
     } else if (parsed.type === 'chunk') {
       const entry = receivedChunks[parsed.name];
       if (!entry) return;
@@ -170,48 +182,45 @@ function receiveFiles(data) {
         const url = URL.createObjectURL(fullBlob);
         const li = document.createElement('li');
         li.innerHTML = `
-          <i class="fileIcon material-icons">insert_drive_file</i>
-          <b>${entry.metadata.name}</b>
-          <b>${(entry.metadata.size / (1024 * 1024)).toFixed(2)} Mb</b>
-          <b>${entry.metadata.type}</b>
-          <b>${new Date(entry.metadata.timestamp).toLocaleTimeString()}</b>
-          <button onclick="downloadFile('${url}', '${entry.metadata.name}')">Download</button>
-        `;
+          <b>${entry.metadata.name}</b> 
+          <b>${(entry.metadata.size / (1024 * 1024)).toFixed(2)} Mb</b> 
+          <b>${entry.metadata.type}</b> 
+          <b>${new Date(entry.metadata.timestamp).toLocaleTimeString()}</b> 
+          <button onclick="downloadFile('${url}', '${entry.metadata.name}')">Download</button>`;
         document.getElementById('receivedFiles').appendChild(li);
         delete receivedChunks[parsed.name];
+        logToBox(`File "${entry.metadata.name}" fully received.`);
       }
     }
   } catch (e) {
-    console.error('Receive Error:', e);
+    console.error("Receive Error:", e);
   }
 }
-
 function downloadFile(url, filename) {
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
   a.click();
-  console.log(`File downloaded: ${filename}`);
+  logToBox(`File downloaded: ${filename}`);
 }
-
 function home() {
   peerId = generatePeerId();
   deviceName = getDevice();
   uiFunctions();
   createPeerConnection();
-
   document.getElementById('startBroadcast').onclick = sendFiles;
   document.getElementById('connectToSender').onclick = () => {
     const targetId = document.getElementById('senderId').value;
+    if (!targetId) return logToBox("Target peer ID required", "error");
     const outgoing = new SimplePeer({ initiator: true, trickle: false });
     outgoing.on('signal', signal => {
       hub.broadcast('connect', { to: targetId, from: peerId, signal });
     });
     outgoing.on('data', receiveFiles);
+    outgoing.on('connect', () => logToBox(`Connected to peer ${targetId}`));
+    outgoing.on('error', err => console.error("Outgoing peer error", err));
     connections[targetId] = outgoing;
   };
 }
 window.onload = home;
 </script>
-</body>
-</html>
