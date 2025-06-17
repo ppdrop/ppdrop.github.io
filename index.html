@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>P2P File Share</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      background: #f9f9f9;
+      color: #333;
+    }
+    #log {
+      white-space: pre-wrap;
+      border: 1px solid #ccc;
+      padding: 10px;
+      height: 200px;
+      overflow-y: auto;
+      background: #fff;
+    }
+    #progressText {
+      font-weight: bold;
+      margin-top: 10px;
+      display: block;
+    }
+    input[type="file"], input[type="text"], button {
+      margin: 5px 0;
+      padding: 8px;
+      width: 100%;
+    }
+    label {
+      margin-top: 10px;
+      display: block;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>📤 P2P File Share</h2>
+
+  <label for="peer_id">Peer ID to Connect:</label>
+  <input type="text" id="peer_id" placeholder="Enter peer ID to connect">
+
+  <label for="select_file_to_send">Select File to Send:</label>
+  <input type="file" id="select_file_to_send">
+
+  <button id="send_button">🔗 Connect & Send</button>
+
+  <span id="progressText">Progress: 0%</span>
+
+  <h3>📜 Log</h3>
+  <div id="log">[Log started]</div>
+
+  <!-- CDN scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/signalhub@5.2.1/signalhub.min.js"></script>
+
+  <!-- App script -->
+  <script>
+    const hub = signalhub('p2p-share-room', ['https://signalhub-jccqtwhdwc.now.sh']);
+    const myId = Math.random().toString(36).substring(2);
+    log(`[Log started]\nYour ID: ${myId}`);
+
+    let peer = null;
+    let fileMeta = null;
+    let chunks = [];
+
+    hub.subscribe('announce').on('data', data => {
+      if (data.to === myId) {
+        connectAsReceiver(data.from);
+      }
+    });
+
+    hub.subscribe('signal').on('data', data => {
+      if (data.to === myId) {
+        peer?.signal(data.signal);
+      }
+    });
+
+    document.getElementById('send_button')?.addEventListener('click', () => {
+      const peerId = document.getElementById('peer_id')?.value;
+      if (!peerId) return log("❌ Enter peer ID to connect.");
+      announceToPeer(peerId);
+      createPeer(true);
+    });
+
+    function announceToPeer(toId) {
+      hub.broadcast('announce', { from: myId, to: toId });
+      log(`📢 Announced to: ${toId}`);
+    }
+
+    function connectAsReceiver(fromId) {
+      log(`📥 Connection request from: ${fromId}`);
+      document.getElementById('peer_id').value = fromId;
+      createPeer(false);
+    }
+
+    function createPeer(initiator) {
+      peer = new SimplePeer({
+        initiator,
+        trickle: false,
+        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+      });
+
+      peer.on('signal', signal => {
+        hub.broadcast('signal', {
+          from: myId,
+          to: document.getElementById('peer_id')?.value || myId,
+          signal
+        });
+      });
+
+      peer.on('connect', () => {
+        log("✅ Peer connected!");
+        if (peer.initiator) sendFileInChunks();
+      });
+
+      peer.on('data', data => handleReceivedChunk(data));
+      peer.on('error', err => log("❌ Peer error: " + err.message));
+      peer.on('close', () => log("❌ Connection closed"));
+    }
+
+    function sendFileInChunks() {
+      const fileInput = document.getElementById('select_file_to_send');
+      const file = fileInput?.files[0];
+      if (!file) return log("❌ No file selected.");
+
+      const chunkSize = 16 * 1024;
+      let offset = 0;
+      const reader = new FileReader();
+
+      reader.onload = e => {
+        const chunk = e.target.result;
+        peer.send(JSON.stringify({
+          meta: {
+            name: file.name,
+            size: file.size,
+            type: file.type
+          },
+          chunk
+        }));
+
+        offset += chunkSize;
+        updateProgress(offset, file.size);
+
+        if (offset < file.size) {
+          readNextChunk(offset);
+        } else {
+          log("✅ File sent.");
+        }
+      };
+
+      function readNextChunk(o) {
+        const slice = file.slice(o, o + chunkSize);
+        reader.readAsDataURL(slice);
+      }
+
+      readNextChunk(0);
+    }
+
+    function handleReceivedChunk(data) {
+      const parsed = JSON.parse(data);
+      if (parsed.meta) {
+        fileMeta = parsed.meta;
+        chunks = [];
+        log(`📦 Receiving: ${fileMeta.name}`);
+      }
+
+      if (parsed.chunk) {
+        chunks.push(parsed.chunk);
+        const totalReceived = chunks.reduce((sum, b64) => sum + atob(b64.split(',')[1]).length, 0);
+        updateProgress(totalReceived, fileMeta?.size);
+
+        if (fileMeta && totalReceived >= fileMeta.size) {
+          saveFileFromChunks();
+        }
+      }
+    }
+
+    function saveFileFromChunks() {
+      const blob = new Blob(
+        chunks.map(base64 => {
+          const binary = atob(base64.split(',')[1]);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          return bytes;
+        }),
+        { type: fileMeta.type }
+      );
+
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = fileMeta.name;
+      a.click();
+
+      log(`✅ Downloaded: ${fileMeta.name}`);
+      fileMeta = null;
+      chunks = [];
+    }
+
+    function updateProgress(done, total) {
+      const percent = Math.floor((done / total) * 100);
+      const progressEl = document.getElementById("progressText");
+      if (progressEl) progressEl.textContent = `Progress: ${percent}%`;
+    }
+
+    function log(message) {
+      const logDiv = document.getElementById("log");
+      if (logDiv) logDiv.textContent += `\n${message}`;
+    }
+  </script>
+</body>
+</html>
