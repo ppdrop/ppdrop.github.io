@@ -2,11 +2,11 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>P2P File Share</title>
+  <title>PeerJS P2P File Share</title>
   <style>
     body { font-family: Arial; margin: 10px; background: #f7f7f7; }
     #home { padding: 10px; border: 1px solid #ccc; background: #fff; }
-    #log { border: 1px solid #ccc; padding: 5px; height: 150px; overflow-y: scroll; background: #000; color: #0f0; font-family: monospace; font-size: 12px; }
+    #log { border: 1px solid #ccc; padding: 5px; height: 150px; overflow-y: auto; background: #000; color: #0f0; font-family: monospace; font-size: 12px; }
     #loader { display: none; }
   </style>
 </head>
@@ -14,7 +14,7 @@
 
 <div id="home">
   <h3>P2P File Sharing</h3>
-  <label><input type="checkbox" id="OpenSendWindow" checked> Send </label>
+  <label><input type="checkbox" id="OpenSendWindow" checked> Send</label>
   <input type="file" id="select_file_to_send"><br><br>
   <input type="text" id="peerIdToConnect" placeholder="Enter Peer ID">
   <button onclick="connectToPeer()">Connect & Send</button>
@@ -26,69 +26,69 @@
 <h4>Log:</h4>
 <div id="log">[Log started]</div>
 
-<script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
-<script src="https://unpkg.com/signalhub@5.0.2/signalhub.js"></script>
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 <script>
-let log = msg => {
+const log = msg => {
   const logEl = document.getElementById('log');
   logEl.innerHTML += `<br>${msg}`;
   logEl.scrollTop = logEl.scrollHeight;
 };
 
-const hub = signalhub('p2p-fileshare', ['https://signalhub-jccqtwhdwc.now.sh']);
-const myId = Math.random().toString(36).substr(2, 9);
-document.getElementById("myid").textContent = myId;
-
-let peer;
-
-hub.subscribe(myId).on('data', (signal) => {
-  log(`📥 Signal received from peer.`);
-  if (!peer) {
-    peer = new SimplePeer({ initiator: false, trickle: false });
-    setupPeer();
-  }
-  peer.signal(signal);
+// Create Peer
+const peer = new Peer(undefined, {
+  host: 'peerjs.com',
+  secure: true,
+  port: 443
 });
 
-function connectToPeer() {
-  const destId = document.getElementById('peerIdToConnect').value.trim();
-  if (!destId) return alert("Enter peer ID");
-  peer = new SimplePeer({ initiator: true, trickle: false });
-  setupPeer();
+let conn;
 
-  peer.on('signal', data => {
-    hub.broadcast(destId, data);
-    log(`📢 Signal sent to ${destId}`);
-  });
-}
+// On Peer Open
+peer.on('open', id => {
+  document.getElementById("myid").textContent = id;
+  log(`🆔 Your Peer ID: ${id}`);
+});
 
-function setupPeer() {
-  peer.on('connect', () => {
-    log('✅ Peer connected!');
-    const fileInput = document.getElementById('select_file_to_send');
-    if (fileInput.files.length > 0) {
-      const file = fileInput.files[0];
-      const reader = new FileReader();
-      reader.onload = () => {
-        peer.send(JSON.stringify({ name: file.name, buffer: reader.result }));
-        log(`📤 File sent: ${file.name}`);
-      };
-      reader.readAsArrayBuffer(file);
+// Incoming connection
+peer.on('connection', connection => {
+  conn = connection;
+  log('🔗 Incoming connection...');
+  conn.on('data', data => {
+    if (data.fileName && data.fileData) {
+      const blob = new Blob([data.fileData]);
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = data.fileName;
+      link.click();
+      log(`✅ File received: ${data.fileName}`);
     }
   });
+});
 
-  peer.on('data', data => {
-    const received = JSON.parse(data);
-    const blob = new Blob([new Uint8Array(received.buffer)]);
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = received.name;
-    a.click();
-    log(`✅ File received: ${received.name}`);
+// Connect to peer and send file
+function connectToPeer() {
+  const peerId = document.getElementById('peerIdToConnect').value.trim();
+  const fileInput = document.getElementById('select_file_to_send');
+  if (!peerId) return alert("Enter a valid Peer ID.");
+  if (!fileInput.files.length) return alert("Please select a file.");
+
+  conn = peer.connect(peerId);
+  conn.on('open', () => {
+    const file = fileInput.files[0];
+    const reader = new FileReader();
+    reader.onload = function () {
+      conn.send({
+        fileName: file.name,
+        fileData: reader.result
+      });
+      log(`📤 File sent: ${file.name}`);
+    };
+    reader.readAsArrayBuffer(file);
   });
 
-  peer.on('error', err => log(`❌ Error: ${err}`));
-  peer.on('close', () => log('🔌 Peer disconnected.'));
+  conn.on('error', err => {
+    log(`❌ Error: ${err}`);
+  });
 }
 </script>
 
