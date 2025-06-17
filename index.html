@@ -1,96 +1,217 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>PeerJS P2P File Share</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>P2P File Share App</title>
   <style>
-    body { font-family: Arial; margin: 10px; background: #f7f7f7; }
-    #home { padding: 10px; border: 1px solid #ccc; background: #fff; }
-    #log { border: 1px solid #ccc; padding: 5px; height: 150px; overflow-y: auto; background: #000; color: #0f0; font-family: monospace; font-size: 12px; }
-    #loader { display: none; }
+    body { font-family: Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+    h2 { margin-top: 0; }
+    #home { max-width: 600px; margin: auto; background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .section { margin-bottom: 20px; }
+    input[type="text"], input[type="file"] { width: 100%; padding: 10px; margin-top: 5px; margin-bottom: 10px; border-radius: 5px; border: 1px solid #ccc; }
+    button { padding: 10px 20px; border: none; background: #007bff; color: #fff; border-radius: 5px; cursor: pointer; }
+    button:hover { background: #0056b3; }
+    ul { list-style: none; padding: 0; }
+    li { background: #eee; margin: 5px 0; padding: 10px; border-radius: 5px; }
+    .loaderOverlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; justify-content: center; align-items: center; color: white; font-size: 18px; }
   </style>
 </head>
 <body>
-
+<div class="loaderOverlay">Transferring...</div>
 <div id="home">
-  <h3>P2P File Sharing</h3>
-  <label><input type="checkbox" id="OpenSendWindow" checked> Send</label>
-  <input type="file" id="select_file_to_send"><br><br>
-  <input type="text" id="peerIdToConnect" placeholder="Enter Peer ID">
-  <button onclick="connectToPeer()">Connect & Send</button>
-  <div id="loader"><span class="loader"></span> <b id="progressText">Sending...</b></div>
-  <br><br>
-  <div><b>Your ID:</b> <span id="myid"></span></div>
+  <h2>P2P File Share</h2>
+
+  <div class="section">
+    <label>My Peer ID:</label> <b id="MySenderID"></b><br>
+    <label>Device:</label> <b id="MyDeviceName"></b>
+    <div id="MyDeviceLogo"></div>
+  </div>
+
+  <div class="section">
+    <input type="file" id="fileInput" multiple>
+    <button id="startBroadcast">Send File(s)</button>
+  </div>
+
+  <div class="section">
+    <input type="text" id="senderId" placeholder="Enter Sender Peer ID">
+    <button id="connectToSender">Connect</button>
+  </div>
+
+  <div class="section">
+    <h3>Received Files:</h3>
+    <ul id="receivedFiles"></ul>
+  </div>
 </div>
 
-<h4>Log:</h4>
-<div id="log">[Log started]</div>
-
-<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
+<script src="https://unpkg.com/signalhub@5.0.1/signalhub.js"></script>
 <script>
-const log = msg => {
-  const logEl = document.getElementById('log');
-  logEl.innerHTML += `<br>${msg}`;
-  logEl.scrollTop = logEl.scrollHeight;
-};
+const hub = signalhub('p2p-file-share-hub', ['https://signalhub-jccqtwhdwc.now.sh']);
+let peerId = null, deviceName = null, connections = {}, sharedFiles = {};
+const receivedChunks = {};
 
-// Create Peer
-const peer = new Peer(undefined, {
-  host: 'peerjs.com',
-  secure: true,
-  port: 443
-});
+function generatePeerId() { return Math.floor(1000 + Math.random() * 9000).toString(); }
 
-let conn;
+function getDevice() {
+  const ua = navigator.userAgent.toLowerCase();
+  if (ua.includes('vivo')) return 'Vivo';
+  if (ua.includes('realme')) return 'Realme';
+  if (ua.includes('mi')) return 'Xiaomi';
+  if (ua.includes('samsung')) return 'Samsung';
+  return 'Android';
+}
 
-// On Peer Open
-peer.on('open', id => {
-  document.getElementById("myid").textContent = id;
-  log(`🆔 Your Peer ID: ${id}`);
-});
+function createDeviceLogo(name) {
+  const logo = document.createElement('div');
+  logo.textContent = name.charAt(0).toUpperCase();
+  logo.style.background = `hsl(${Math.random() * 360}, 70%, 60%)`;
+  logo.style.color = '#fff';
+  logo.style.width = '40px';
+  logo.style.height = '40px';
+  logo.style.borderRadius = '50%';
+  logo.style.display = 'flex';
+  logo.style.justifyContent = 'center';
+  logo.style.alignItems = 'center';
+  return logo;
+}
 
-// Incoming connection
-peer.on('connection', connection => {
-  conn = connection;
-  log('🔗 Incoming connection...');
-  conn.on('data', data => {
-    if (data.fileName && data.fileData) {
-      const blob = new Blob([data.fileData]);
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = data.fileName;
-      link.click();
-      log(`✅ File received: ${data.fileName}`);
+function uiFunctions() {
+  document.getElementById('MySenderID').textContent = peerId;
+  document.getElementById('MyDeviceName').textContent = deviceName;
+  document.getElementById('MyDeviceLogo').appendChild(createDeviceLogo(deviceName));
+}
+
+function android13loader(show = true) {
+  document.querySelector('.loaderOverlay').style.display = show ? 'flex' : 'none';
+}
+
+function android13popup(message) {
+  const popup = document.createElement('div');
+  popup.textContent = message;
+  popup.style.position = 'fixed';
+  popup.style.bottom = '10px';
+  popup.style.left = '10px';
+  popup.style.background = '#333';
+  popup.style.color = '#fff';
+  popup.style.padding = '10px';
+  popup.style.borderRadius = '8px';
+  document.body.appendChild(popup);
+  setTimeout(() => popup.remove(), 3000);
+}
+
+function createPeerConnection() {
+  hub.subscribe('connect').on('data', (data) => {
+    if (data.to === peerId && !connections[data.from]) {
+      const incoming = new SimplePeer({ initiator: false, trickle: false });
+      incoming.on('signal', signal => hub.broadcast('signal', { to: data.from, from: peerId, signal }));
+      incoming.on('data', receiveFiles);
+      connections[data.from] = incoming;
+      incoming.signal(data.signal);
     }
   });
-});
 
-// Connect to peer and send file
-function connectToPeer() {
-  const peerId = document.getElementById('peerIdToConnect').value.trim();
-  const fileInput = document.getElementById('select_file_to_send');
-  if (!peerId) return alert("Enter a valid Peer ID.");
-  if (!fileInput.files.length) return alert("Please select a file.");
-
-  conn = peer.connect(peerId);
-  conn.on('open', () => {
-    const file = fileInput.files[0];
-    const reader = new FileReader();
-    reader.onload = function () {
-      conn.send({
-        fileName: file.name,
-        fileData: reader.result
-      });
-      log(`📤 File sent: ${file.name}`);
-    };
-    reader.readAsArrayBuffer(file);
-  });
-
-  conn.on('error', err => {
-    log(`❌ Error: ${err}`);
+  hub.subscribe('signal').on('data', (data) => {
+    if (data.to === peerId && connections[data.from]) {
+      connections[data.from].signal(data.signal);
+    }
   });
 }
-</script>
 
+function sendFiles() {
+  const files = document.getElementById('fileInput').files;
+  for (let file of files) {
+    const CHUNK_SIZE = 64 * 1024;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const arrayBuffer = reader.result;
+      const uint8Array = new Uint8Array(arrayBuffer);
+      const totalChunks = Math.ceil(uint8Array.length / CHUNK_SIZE);
+      const metadata = {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        timestamp: Date.now(),
+        totalChunks
+      };
+      for (let id in connections) {
+        connections[id].send(JSON.stringify({ type: 'meta', metadata }));
+      }
+      android13loader(true);
+      for (let i = 0; i < totalChunks; i++) {
+        const chunk = uint8Array.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        for (let id in connections) {
+          connections[id].send(JSON.stringify({
+            type: 'chunk',
+            name: file.name,
+            index: i,
+            chunk: Array.from(chunk)
+          }));
+        }
+      }
+      android13loader(false);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+}
+
+function receiveFiles(data) {
+  try {
+    const parsed = JSON.parse(data);
+    if (parsed.type === 'meta') {
+      receivedChunks[parsed.metadata.name] = { metadata: parsed.metadata, chunks: [], count: 0 };
+    } else if (parsed.type === 'chunk') {
+      const entry = receivedChunks[parsed.name];
+      if (!entry) return;
+      entry.chunks[parsed.index] = new Uint8Array(parsed.chunk);
+      entry.count++;
+      if (entry.count === entry.metadata.totalChunks) {
+        const fullBlob = new Blob(entry.chunks, { type: entry.metadata.type });
+        const url = URL.createObjectURL(fullBlob);
+        const li = document.createElement('li');
+        li.innerHTML = `
+          <i class="fileIcon material-icons">insert_drive_file</i>
+          <b>${entry.metadata.name}</b>
+          <b>${(entry.metadata.size / (1024 * 1024)).toFixed(2)} Mb</b>
+          <b>${entry.metadata.type}</b>
+          <b>${new Date(entry.metadata.timestamp).toLocaleTimeString()}</b>
+          <button onclick="downloadFile('${url}', '${entry.metadata.name}')">Download</button>
+        `;
+        document.getElementById('receivedFiles').appendChild(li);
+        delete receivedChunks[parsed.name];
+      }
+    }
+  } catch (e) {
+    console.error('Receive Error:', e);
+  }
+}
+
+function downloadFile(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  console.log(`File downloaded: ${filename}`);
+}
+
+function home() {
+  peerId = generatePeerId();
+  deviceName = getDevice();
+  uiFunctions();
+  createPeerConnection();
+
+  document.getElementById('startBroadcast').onclick = sendFiles;
+  document.getElementById('connectToSender').onclick = () => {
+    const targetId = document.getElementById('senderId').value;
+    const outgoing = new SimplePeer({ initiator: true, trickle: false });
+    outgoing.on('signal', signal => {
+      hub.broadcast('connect', { to: targetId, from: peerId, signal });
+    });
+    outgoing.on('data', receiveFiles);
+    connections[targetId] = outgoing;
+  };
+}
+window.onload = home;
+</script>
 </body>
 </html>
