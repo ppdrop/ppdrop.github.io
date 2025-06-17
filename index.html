@@ -1,214 +1,96 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
+  <meta charset="utf-8" />
   <title>P2P File Share</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      padding: 20px;
-      background: #f9f9f9;
-      color: #333;
-    }
-    #log {
-      white-space: pre-wrap;
-      border: 1px solid #ccc;
-      padding: 10px;
-      height: 200px;
-      overflow-y: auto;
-      background: #fff;
-    }
-    #progressText {
-      font-weight: bold;
-      margin-top: 10px;
-      display: block;
-    }
-    input[type="file"], input[type="text"], button {
-      margin: 5px 0;
-      padding: 8px;
-      width: 100%;
-    }
-    label {
-      margin-top: 10px;
-      display: block;
-      font-weight: bold;
-    }
+    body { font-family: Arial; margin: 10px; background: #f7f7f7; }
+    #home { padding: 10px; border: 1px solid #ccc; background: #fff; }
+    #log { border: 1px solid #ccc; padding: 5px; height: 150px; overflow-y: scroll; background: #000; color: #0f0; font-family: monospace; font-size: 12px; }
+    #loader { display: none; }
   </style>
 </head>
 <body>
 
-  <h2>📤 P2P File Share</h2>
+<div id="home">
+  <h3>P2P File Sharing</h3>
+  <label><input type="checkbox" id="OpenSendWindow" checked> Send </label>
+  <input type="file" id="select_file_to_send"><br><br>
+  <input type="text" id="peerIdToConnect" placeholder="Enter Peer ID">
+  <button onclick="connectToPeer()">Connect & Send</button>
+  <div id="loader"><span class="loader"></span> <b id="progressText">Sending...</b></div>
+  <br><br>
+  <div><b>Your ID:</b> <span id="myid"></span></div>
+</div>
 
-  <label for="peer_id">Peer ID to Connect:</label>
-  <input type="text" id="peer_id" placeholder="Enter peer ID to connect">
+<h4>Log:</h4>
+<div id="log">[Log started]</div>
 
-  <label for="select_file_to_send">Select File to Send:</label>
-  <input type="file" id="select_file_to_send">
+<script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
+<script src="https://unpkg.com/signalhub@5.0.2/signalhub.js"></script>
+<script>
+let log = msg => {
+  const logEl = document.getElementById('log');
+  logEl.innerHTML += `<br>${msg}`;
+  logEl.scrollTop = logEl.scrollHeight;
+};
 
-  <button id="send_button">🔗 Connect & Send</button>
+const hub = signalhub('p2p-fileshare', ['https://signalhub-jccqtwhdwc.now.sh']);
+const myId = Math.random().toString(36).substr(2, 9);
+document.getElementById("myid").textContent = myId;
 
-  <span id="progressText">Progress: 0%</span>
+let peer;
 
-  <h3>📜 Log</h3>
-  <div id="log">[Log started]</div>
+hub.subscribe(myId).on('data', (signal) => {
+  log(`📥 Signal received from peer.`);
+  if (!peer) {
+    peer = new SimplePeer({ initiator: false, trickle: false });
+    setupPeer();
+  }
+  peer.signal(signal);
+});
 
-  <!-- CDN scripts -->
-  <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/signalhub@5.2.1/signalhub.min.js"></script>
+function connectToPeer() {
+  const destId = document.getElementById('peerIdToConnect').value.trim();
+  if (!destId) return alert("Enter peer ID");
+  peer = new SimplePeer({ initiator: true, trickle: false });
+  setupPeer();
 
-  <!-- App script -->
-  <script>
-    const hub = signalhub('p2p-share-room', ['https://signalhub-jccqtwhdwc.now.sh']);
-    const myId = Math.random().toString(36).substring(2);
-    log(`[Log started]\nYour ID: ${myId}`);
+  peer.on('signal', data => {
+    hub.broadcast(destId, data);
+    log(`📢 Signal sent to ${destId}`);
+  });
+}
 
-    let peer = null;
-    let fileMeta = null;
-    let chunks = [];
-
-    hub.subscribe('announce').on('data', data => {
-      if (data.to === myId) {
-        connectAsReceiver(data.from);
-      }
-    });
-
-    hub.subscribe('signal').on('data', data => {
-      if (data.to === myId) {
-        peer?.signal(data.signal);
-      }
-    });
-
-    document.getElementById('send_button')?.addEventListener('click', () => {
-      const peerId = document.getElementById('peer_id')?.value;
-      if (!peerId) return log("❌ Enter peer ID to connect.");
-      announceToPeer(peerId);
-      createPeer(true);
-    });
-
-    function announceToPeer(toId) {
-      hub.broadcast('announce', { from: myId, to: toId });
-      log(`📢 Announced to: ${toId}`);
-    }
-
-    function connectAsReceiver(fromId) {
-      log(`📥 Connection request from: ${fromId}`);
-      document.getElementById('peer_id').value = fromId;
-      createPeer(false);
-    }
-
-    function createPeer(initiator) {
-      peer = new SimplePeer({
-        initiator,
-        trickle: false,
-        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
-      });
-
-      peer.on('signal', signal => {
-        hub.broadcast('signal', {
-          from: myId,
-          to: document.getElementById('peer_id')?.value || myId,
-          signal
-        });
-      });
-
-      peer.on('connect', () => {
-        log("✅ Peer connected!");
-        if (peer.initiator) sendFileInChunks();
-      });
-
-      peer.on('data', data => handleReceivedChunk(data));
-      peer.on('error', err => log("❌ Peer error: " + err.message));
-      peer.on('close', () => log("❌ Connection closed"));
-    }
-
-    function sendFileInChunks() {
-      const fileInput = document.getElementById('select_file_to_send');
-      const file = fileInput?.files[0];
-      if (!file) return log("❌ No file selected.");
-
-      const chunkSize = 16 * 1024;
-      let offset = 0;
+function setupPeer() {
+  peer.on('connect', () => {
+    log('✅ Peer connected!');
+    const fileInput = document.getElementById('select_file_to_send');
+    if (fileInput.files.length > 0) {
+      const file = fileInput.files[0];
       const reader = new FileReader();
-
-      reader.onload = e => {
-        const chunk = e.target.result;
-        peer.send(JSON.stringify({
-          meta: {
-            name: file.name,
-            size: file.size,
-            type: file.type
-          },
-          chunk
-        }));
-
-        offset += chunkSize;
-        updateProgress(offset, file.size);
-
-        if (offset < file.size) {
-          readNextChunk(offset);
-        } else {
-          log("✅ File sent.");
-        }
+      reader.onload = () => {
+        peer.send(JSON.stringify({ name: file.name, buffer: reader.result }));
+        log(`📤 File sent: ${file.name}`);
       };
-
-      function readNextChunk(o) {
-        const slice = file.slice(o, o + chunkSize);
-        reader.readAsDataURL(slice);
-      }
-
-      readNextChunk(0);
+      reader.readAsArrayBuffer(file);
     }
+  });
 
-    function handleReceivedChunk(data) {
-      const parsed = JSON.parse(data);
-      if (parsed.meta) {
-        fileMeta = parsed.meta;
-        chunks = [];
-        log(`📦 Receiving: ${fileMeta.name}`);
-      }
+  peer.on('data', data => {
+    const received = JSON.parse(data);
+    const blob = new Blob([new Uint8Array(received.buffer)]);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = received.name;
+    a.click();
+    log(`✅ File received: ${received.name}`);
+  });
 
-      if (parsed.chunk) {
-        chunks.push(parsed.chunk);
-        const totalReceived = chunks.reduce((sum, b64) => sum + atob(b64.split(',')[1]).length, 0);
-        updateProgress(totalReceived, fileMeta?.size);
+  peer.on('error', err => log(`❌ Error: ${err}`));
+  peer.on('close', () => log('🔌 Peer disconnected.'));
+}
+</script>
 
-        if (fileMeta && totalReceived >= fileMeta.size) {
-          saveFileFromChunks();
-        }
-      }
-    }
-
-    function saveFileFromChunks() {
-      const blob = new Blob(
-        chunks.map(base64 => {
-          const binary = atob(base64.split(',')[1]);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-          return bytes;
-        }),
-        { type: fileMeta.type }
-      );
-
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = fileMeta.name;
-      a.click();
-
-      log(`✅ Downloaded: ${fileMeta.name}`);
-      fileMeta = null;
-      chunks = [];
-    }
-
-    function updateProgress(done, total) {
-      const percent = Math.floor((done / total) * 100);
-      const progressEl = document.getElementById("progressText");
-      if (progressEl) progressEl.textContent = `Progress: ${percent}%`;
-    }
-
-    function log(message) {
-      const logDiv = document.getElementById("log");
-      if (logDiv) logDiv.textContent += `\n${message}`;
-    }
-  </script>
 </body>
 </html>
